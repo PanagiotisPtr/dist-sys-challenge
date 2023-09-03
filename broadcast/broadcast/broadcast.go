@@ -114,7 +114,10 @@ func (n *BroadcastNode) Broadcast(request BroadcastRequest) (
 	BroadcastResponse,
 	error,
 ) {
-	if _, ok := n.messages[request.Message]; ok {
+	n.m.RLock()
+	_, exists := n.messages[request.Message]
+	n.m.RUnlock()
+	if exists {
 		return BroadcastResponse{
 			Type: "broadcast_ok",
 		}, nil
@@ -124,12 +127,12 @@ func (n *BroadcastNode) Broadcast(request BroadcastRequest) (
 	n.messages[request.Message] = struct{}{}
 	n.m.Unlock()
 
+	n.routines.Add(1)
 	go func() {
-		n.routines.Add(1)
 		defer n.routines.Done()
 		for i, nb := range n.neighbours {
+			n.routines.Add(1)
 			go func(j int, nbg string) {
-				n.routines.Add(1)
 				defer n.routines.Done()
 				for attempts := 0; attempts < 100; attempts++ {
 					select {
