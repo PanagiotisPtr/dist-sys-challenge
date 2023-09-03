@@ -1,8 +1,10 @@
 package broadcast
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -12,6 +14,7 @@ type BroadcastNode struct {
 	messages   map[int]struct{}
 	neighbours []string
 	m          sync.RWMutex
+	shutdown   chan struct{}
 }
 
 func MaelstromHandler[Request any, Response any](
@@ -121,17 +124,67 @@ func (n *BroadcastNode) Broadcast(request BroadcastRequest) (
 	n.messages[request.Message] = struct{}{}
 	n.m.Unlock()
 
-	for _, nb := range n.neighbours {
-		n.Send(
-			nb,
-			map[string]any{
-				"type":    "broadcast",
-				"message": request.Message,
-			},
-		)
-	}
+	go func() {
+		attempts := 0
+		wg := sync.WaitGroup{}
+		m := sync.Mutex{}
+		checks := make([]bool, len(n.neighbours))
+		for attempts < 100 {
+			for i, nb := range n.neighbours {
+				if checks[i] {
+					continue
+				}
+				wg.Add(1)
+				go func(j int, nbg string) {
+					defer wg.Done()
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					defer cancel()
+					res, err := n.SyncRPC(
+						ctx,
+						nbg,
+						map[string]any{
+							"type":    "broadcast",
+							"message": request.Message,
+						},
+					)
+					if err == nil && res.Type() == "broadcast_ok" {
+						m.Lock()
+						checks[j] = true
+						m.Unlock()
+					}
+				}(i, nb)
+			}
+			select {
+			case <-n.shutdown:
+				return
+			default:
+				wg.Wait()
+				done := true
+				for _, c := range checks {
+					if !c {
+						done = false
+						break
+					}
+				}
+				if done {
+					break
+				}
+				attempts++
+				time.Sleep(time.Second)
+			}
+		}
+	}()
 
 	return BroadcastResponse{
 		Type: "broadcast_ok",
 	}, nil
+}
+
+func (n *BroadcastNode) Run() error {
+	defer func() {
+		n.shutdown <- struct{}{}
+		close(n.shutdown)
+	}()
+
+	return n.Node.Run()
 }
