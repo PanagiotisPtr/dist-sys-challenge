@@ -1,7 +1,6 @@
 package broadcast
 
 import (
-	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -128,53 +127,48 @@ func (n *BroadcastNode) Broadcast(request BroadcastRequest) (
 	go func() {
 		n.routines.Add(1)
 		defer n.routines.Done()
-		attempts := 0
-		wg := sync.WaitGroup{}
-		m := sync.Mutex{}
-		checks := make([]bool, len(n.neighbours))
-		for attempts < 100 {
-			for i, nb := range n.neighbours {
-				if checks[i] {
-					continue
-				}
-				wg.Add(1)
-				go func(j int, nbg string) {
-					defer wg.Done()
-					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-					defer cancel()
-					res, err := n.SyncRPC(
-						ctx,
-						nbg,
-						map[string]any{
-							"type":    "broadcast",
-							"message": request.Message,
-						},
-					)
-					if err == nil && res.Type() == "broadcast_ok" {
-						m.Lock()
-						checks[j] = true
-						m.Unlock()
+		for i, nb := range n.neighbours {
+			go func(j int, nbg string) {
+				n.routines.Add(1)
+				defer n.routines.Done()
+				for attempts := 0; attempts < 100; attempts++ {
+					select {
+					case <-n.shutdown:
+						return
+					default:
+						finished := make(chan string)
+						err := n.RPC(
+							nbg,
+							map[string]any{
+								"type":    "broadcast",
+								"message": request.Message,
+							},
+							func(msg maelstrom.Message) error {
+								var response BroadcastResponse
+								if err := json.Unmarshal(msg.Body, &response); err != nil {
+									return err
+								}
+								finished <- response.Type
+								return nil
+							},
+						)
+						if err != nil {
+							continue
+						}
+						select {
+						case <-n.shutdown:
+							return
+						case <-time.After(time.Second):
+							continue
+						case t := <-finished:
+							if t == "broadcast_ok" {
+								return
+							}
+							continue
+						}
 					}
-				}(i, nb)
-			}
-			select {
-			case <-n.shutdown:
-				return
-			default:
-				wg.Wait()
-				done := true
-				for _, c := range checks {
-					if !c {
-						done = false
-						break
-					}
 				}
-				if done {
-					break
-				}
-				attempts++
-				time.Sleep(time.Second)
-			}
+			}(i, nb)
 		}
 	}()
 
@@ -185,7 +179,6 @@ func (n *BroadcastNode) Broadcast(request BroadcastRequest) (
 
 func (n *BroadcastNode) Run() error {
 	defer func() {
-		n.shutdown <- struct{}{}
 		close(n.shutdown)
 
 		n.routines.Wait()
