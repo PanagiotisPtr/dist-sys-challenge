@@ -17,13 +17,22 @@ type BroadcastNode struct {
 	shutdown   chan struct{}
 }
 
+type Message[T any] struct {
+	Src  string `json:"src"`
+	Dest string `json:"dest"`
+	Body T      `json:"body"`
+}
+
 func MaelstromHandler[Request any, Response any](
 	n *maelstrom.Node,
-	h func(Request) (Response, error),
+	h func(Message[Request]) (Response, error),
 ) maelstrom.HandlerFunc {
 	return func(msg maelstrom.Message) error {
-		var request Request
-		if err := json.Unmarshal(msg.Body, &request); err != nil {
+		request := Message[Request]{
+			Src:  msg.Src,
+			Dest: msg.Dest,
+		}
+		if err := json.Unmarshal(msg.Body, &request.Body); err != nil {
 			return err
 		}
 		res, err := h(request)
@@ -60,13 +69,13 @@ type TopologyResponse struct {
 	Type string `json:"type"`
 }
 
-func (n *BroadcastNode) Topology(request TopologyRequest) (
+func (n *BroadcastNode) Topology(request Message[TopologyRequest]) (
 	TopologyResponse,
 	error,
 ) {
 	n.m.Lock()
 	defer n.m.Unlock()
-	for _, nb := range request.Topology[n.ID()] {
+	for _, nb := range request.Body.Topology[n.ID()] {
 		n.neighbours = append(n.neighbours, nb)
 	}
 
@@ -82,7 +91,7 @@ type ReadResponse struct {
 	Messages []int  `json:"messages"`
 }
 
-func (n *BroadcastNode) Read(request ReadRequest) (
+func (n *BroadcastNode) Read(request Message[ReadRequest]) (
 	ReadResponse,
 	error,
 ) {
@@ -110,12 +119,12 @@ type BroadcastResponse struct {
 	Type string `json:"type"`
 }
 
-func (n *BroadcastNode) Broadcast(request BroadcastRequest) (
+func (n *BroadcastNode) Broadcast(request Message[BroadcastRequest]) (
 	BroadcastResponse,
 	error,
 ) {
 	n.m.RLock()
-	_, exists := n.messages[request.Message]
+	_, exists := n.messages[request.Body.Message]
 	n.m.RUnlock()
 	if exists {
 		return BroadcastResponse{
@@ -124,13 +133,17 @@ func (n *BroadcastNode) Broadcast(request BroadcastRequest) (
 	}
 
 	n.m.Lock()
-	n.messages[request.Message] = struct{}{}
+	n.messages[request.Body.Message] = struct{}{}
 	n.m.Unlock()
 
 	n.routines.Add(1)
 	go func() {
 		defer n.routines.Done()
 		for i, nb := range n.neighbours {
+			if request.Src == nb || request.Dest == request.Src {
+				continue
+			}
+
 			n.routines.Add(1)
 			go func(j int, nbg string) {
 				defer n.routines.Done()
@@ -142,9 +155,9 @@ func (n *BroadcastNode) Broadcast(request BroadcastRequest) (
 						finished := make(chan string)
 						err := n.RPC(
 							nbg,
-							map[string]any{
-								"type":    "broadcast",
-								"message": request.Message,
+							BroadcastRequest{
+								Type:    "broadcast",
+								Message: request.Body.Message,
 							},
 							func(msg maelstrom.Message) error {
 								var response BroadcastResponse
