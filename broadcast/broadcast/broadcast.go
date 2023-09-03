@@ -14,6 +14,7 @@ type BroadcastNode struct {
 	messages   map[int]struct{}
 	neighbours []string
 	m          sync.RWMutex
+	routines   sync.WaitGroup
 	shutdown   chan struct{}
 }
 
@@ -125,6 +126,8 @@ func (n *BroadcastNode) Broadcast(request BroadcastRequest) (
 	n.m.Unlock()
 
 	go func() {
+		n.routines.Add(1)
+		defer n.routines.Done()
 		attempts := 0
 		wg := sync.WaitGroup{}
 		m := sync.Mutex{}
@@ -184,6 +187,8 @@ func (n *BroadcastNode) Run() error {
 	defer func() {
 		n.shutdown <- struct{}{}
 		close(n.shutdown)
+
+		n.routines.Wait()
 	}()
 
 	return n.Node.Run()
