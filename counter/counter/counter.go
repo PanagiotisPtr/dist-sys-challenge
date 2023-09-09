@@ -15,7 +15,9 @@ type CounterNode struct {
 	maelstrom.Node
 	neighbours []string
 	mc         sync.RWMutex
+	md         sync.RWMutex
 	counter    int
+	delta      int
 	store      *maelstrom.KV
 	routines   sync.WaitGroup
 	shutdown   chan struct{}
@@ -58,6 +60,25 @@ func NewCounterNode() *CounterNode {
 	n.Handle("topology", MaelstromHandler(&n.Node, n.Topology))
 	n.Handle("add", MaelstromHandler(&n.Node, n.Add))
 	n.Handle("read", MaelstromHandler(&n.Node, n.Read))
+
+	// push counter updates
+	go func() {
+		for {
+			select {
+			case <-n.shutdown:
+				return
+			case <-time.Tick(time.Second):
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				n.md.Lock()
+				err := n.store.CompareAndSwap(ctx, counterKey, n.counter, n.counter+n.delta, true)
+				if err == nil {
+					n.delta = 0
+				}
+				n.md.Unlock()
+			}
+		}
+	}()
 
 	// poll counter to keep it in sync
 	go func() {
@@ -112,24 +133,9 @@ type AddResponse struct {
 
 func (n *CounterNode) Add(request Message[AddRequest]) (AddResponse, error) {
 	reqDelta := request.Body.Delta
-
-	go func() {
-		for {
-			select {
-			case <-n.shutdown:
-				return
-			case <-time.Tick(time.Millisecond * 100):
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				n.mc.RLock()
-				err := n.store.CompareAndSwap(ctx, counterKey, n.counter, n.counter+reqDelta, true)
-				n.mc.RUnlock()
-				if err == nil {
-					return
-				}
-			}
-		}
-	}()
+	n.md.Lock()
+	n.delta += reqDelta
+	n.md.Unlock()
 
 	return AddResponse{Type: "add_ok"}, nil
 }
