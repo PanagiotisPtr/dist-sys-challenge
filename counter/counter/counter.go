@@ -19,7 +19,6 @@ type CounterNode struct {
 	counter    int
 	delta      int
 	store      *maelstrom.KV
-	routines   sync.WaitGroup
 	shutdown   chan struct{}
 }
 
@@ -159,8 +158,6 @@ func (n *CounterNode) Read(request Message[ReadRequest]) (ReadResponse, error) {
 func (n *CounterNode) Run() error {
 	defer func() {
 		close(n.shutdown)
-
-		n.routines.Wait()
 	}()
 
 	return n.Node.Run()
